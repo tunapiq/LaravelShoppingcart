@@ -25,7 +25,7 @@ class Cart
 
     /**
      * Instance of the event dispatcher.
-     * 
+     *
      * @var \Illuminate\Contracts\Events\Dispatcher
      */
     private $events;
@@ -36,6 +36,14 @@ class Cart
      * @var string
      */
     private $instance;
+
+    /**
+     * Keeps track of cart coupon during internal operations
+     *
+     * @var Coupon
+     */
+    private $coupon;
+
 
     /**
      * Cart constructor.
@@ -77,6 +85,57 @@ class Cart
     }
 
     /**
+     * Set the Coupon
+     *
+     * @param string $coupon
+     * @return \Gloudemans\Shoppingcart\CartItem
+     */
+    public function addCoupon(Collection $coupon = NULL)
+    {
+       $coupon = new Coupon($coupon);
+       $content = $this->getContent();
+       if($content -> count() > 0){
+         if($coupon -> isNotExpired()){
+           $content->put('coupon', $coupon);
+           $this->session->put($this->instance, $content);
+           if( $this -> total() == $this -> couponTotal()){
+             $this -> removeCoupon();
+             return ["errors" => ["Your shopping cart does not meet the requirement for this coupon."]];
+           }
+           return ["success" => ["Coupon applied successfully."]];
+         }else{
+           return ["errors" => ["The provided coupon is either invalid or expired."]];
+         }
+       }else{
+         return ["errors" => ["Your shopping cart is empty."]];
+       }
+    }
+
+    /**
+     * Remove coupon from cart
+     *
+     * @return \Gloudemans\Shoppingcart\CartItem
+     */
+    public function removeCoupon()
+    {
+      //get content without coupon
+      $content = $this->getContent();
+      //save content without coupon
+      $this->session->put($this->instance, $content);
+      return $this;
+    }
+
+    /**
+     * Get the name of the coupon
+     *
+     * @return string
+     */
+    public function couponName(){
+      $coupon = $this->getCoupon();
+      return $coupon?$coupon->getName():'';
+    }
+
+    /**
      * Add an item to the cart.
      *
      * @param mixed     $id
@@ -103,9 +162,10 @@ class Cart
         }
 
         $content->put($cartItem->rowId, $cartItem);
-        
-        $this->events->fire('cart.added', $cartItem);
 
+        $this->events->fire('cart.added', $cartItem);
+        //restore the coupon to session
+        if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
 
         return $cartItem;
@@ -149,7 +209,8 @@ class Cart
         }
 
         $this->events->fire('cart.updated', $cartItem);
-
+        //restore the coupon to session
+        if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
 
         return $cartItem;
@@ -170,7 +231,8 @@ class Cart
         $content->pull($cartItem->rowId);
 
         $this->events->fire('cart.removed', $cartItem);
-
+        //restore the coupon to session
+        if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
     }
 
@@ -184,8 +246,9 @@ class Cart
     {
         $content = $this->getContent();
 
-        if ( ! $content->has($rowId))
+        if (! $content->has($rowId)) {
             throw new InvalidRowIDException("The cart does not contain rowId {$rowId}.");
+        }
 
         return $content->get($rowId);
     }
@@ -207,11 +270,14 @@ class Cart
      */
     public function content()
     {
-        if (is_null($this->session->get($this->instance))) {
+      $content = $this->session->get($this->instance);
+        if (is_null($content)) {
             return new Collection([]);
         }
-
-        return $this->session->get($this->instance);
+        //return only cartItems, from a copy of session data
+        $content = clone $content;
+        $content -> pull('coupon');
+        return $content;
     }
 
     /**
@@ -242,6 +308,30 @@ class Cart
             return $total + ($cartItem->qty * $cartItem->priceTax);
         }, 0);
 
+        return $this->numberFormat($total, $decimals, $decimalPoint, $thousandSeperator);
+    }
+
+    /**
+     * Get the total price of the items in the cart and apply any coupon available
+     *
+     * @return string
+     */
+    public function couponTotal($decimals = null, $decimalPoint = null, $thousandSeperator = null)
+    {
+        //get cart items and coupons if any
+        $content = $this->getContent();
+        $total = 0;
+        $cart_total = floatval($this -> total(2,'.',''));
+        $cart_item_count = $content -> count();
+        if($this -> coupon){
+          if($this -> coupon -> isNotExpired()){
+            $total = $content->reduce(function ($total, CartItem $cartItem) use ($cart_total,$cart_item_count) {
+                return $total + $this -> coupon -> calculatePriceForItem($cartItem, $cart_total, $cart_item_count);
+            }, 0);
+          }else{
+            $this -> removeCoupon();
+          }
+        }
         return $this->numberFormat($total, $decimals, $decimalPoint, $thousandSeperator);
     }
 
@@ -305,7 +395,7 @@ class Cart
      */
     public function associate($rowId, $model)
     {
-        if(is_string($model) && ! class_exists($model)) {
+        if (is_string($model) && ! class_exists($model)) {
             throw new UnknownModelException("The supplied model {$model} does not exist.");
         }
 
@@ -316,7 +406,8 @@ class Cart
         $content = $this->getContent();
 
         $content->put($cartItem->rowId, $cartItem);
-
+        //restore the coupon to session
+      if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
     }
 
@@ -336,7 +427,8 @@ class Cart
         $content = $this->getContent();
 
         $content->put($cartItem->rowId, $cartItem);
-
+        //restore the coupon to session
+       if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
     }
 
@@ -371,7 +463,7 @@ class Cart
      */
     public function restore($identifier)
     {
-        if( ! $this->storedCartWithIdentifierExists($identifier)) {
+        if (! $this->storedCartWithIdentifierExists($identifier)) {
             return;
         }
 
@@ -391,7 +483,8 @@ class Cart
         }
 
         $this->events->fire('cart.restored');
-
+        //restore the coupon to session
+        if($this -> coupon) $content->put('coupon', $this -> coupon);
         $this->session->put($this->instance, $content);
 
         $this->instance($currentInstance);
@@ -408,15 +501,15 @@ class Cart
      */
     public function __get($attribute)
     {
-        if($attribute === 'total') {
+        if ($attribute === 'total') {
             return $this->total();
         }
 
-        if($attribute === 'tax') {
+        if ($attribute === 'tax') {
             return $this->tax();
         }
 
-        if($attribute === 'subtotal') {
+        if ($attribute === 'subtotal') {
             return $this->subtotal();
         }
 
@@ -433,8 +526,24 @@ class Cart
         $content = $this->session->has($this->instance)
             ? $this->session->get($this->instance)
             : new Collection;
-
+        //save coupon temporarily if there is any
+        $this -> coupon = $this -> getCoupon();
+        //return only cartItems, from a copy of session data
+        $content = clone $content;
+        $content->pull('coupon');
         return $content;
+    }
+
+    protected function getCoupon(){
+
+      $content = $this->session->get($this->instance);
+      if($content && $content -> has('coupon')){
+        $content = $content -> get('coupon');
+      }else{
+        $content = null;
+      }
+      return $content;
+
     }
 
     /**
@@ -474,7 +583,9 @@ class Cart
      */
     private function isMulti($item)
     {
-        if ( ! is_array($item)) return false;
+        if (! is_array($item)) {
+            return false;
+        }
 
         return is_array(head($item)) || head($item) instanceof Buyable;
     }
@@ -533,13 +644,13 @@ class Cart
      */
     private function numberFormat($value, $decimals, $decimalPoint, $thousandSeperator)
     {
-        if(is_null($decimals)){
+        if (is_null($decimals)) {
             $decimals = is_null(config('cart.format.decimals')) ? 2 : config('cart.format.decimals');
         }
-        if(is_null($decimalPoint)){
+        if (is_null($decimalPoint)) {
             $decimalPoint = is_null(config('cart.format.decimal_point')) ? '.' : config('cart.format.decimal_point');
         }
-        if(is_null($thousandSeperator)){
+        if (is_null($thousandSeperator)) {
             $thousandSeperator = is_null(config('cart.format.thousand_seperator')) ? ',' : config('cart.format.thousand_seperator');
         }
 
